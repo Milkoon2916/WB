@@ -1,382 +1,309 @@
 /**
- * workbook-generator.js
- * 지문(passage)을 넣으면 4단계 워크북 데이터를 생성하는 모듈.
- * 브라우저에서 사용자 자신의 Gemini API 키로 직접 호출하는 구조.
+ * workbook-renderer.js
+ * generateWorkbook()이 반환한 데이터를 학생용 워크북 HTML로 변환.
+ * 이 HTML을 그대로 브라우저 미리보기에 쓰거나, 백엔드로 보내
+ * wkhtmltopdf 등으로 PDF 변환하면 됩니다.
  *
  * 사용 예:
- *   import { generateWorkbook, MODEL_OPTIONS } from "./workbook-generator.js";
- *   const workbook = await generateWorkbook({
- *     passage: "...",
- *     apiKey: "AIza...",
- *     model: "gemini-3.6-flash",
- *   });
+ *   import { renderWorkbookHTML } from "./workbook-renderer.js";
+ *   const html = renderWorkbookHTML(workbook, { title: "지문 제목" });
  */
 
-// ---------------------------------------------------------
-// 1. 모델 옵션 (드롭다운 UI에 그대로 사용 가능)
-// ---------------------------------------------------------
-export const MODEL_OPTIONS = [
-  {
-    value: "gemini-3.5-flash-lite",
-    label: "빠르고 저렴 (3.5 Flash-Lite)",
-    description: "대량 생성/속도 우선일 때",
-  },
-  {
-    value: "gemini-3.6-flash",
-    label: "균형 (3.6 Flash) - 추천",
-    description: "구조화 추출 정확도와 비용의 균형",
-  },
-  {
-    value: "gemini-3.1-pro",
-    label: "고품질 (3.1 Pro)",
-    description: "어법 포인트 선정처럼 정교한 판단이 필요할 때",
-  },
-];
-
-const DEFAULT_MODEL = "gemini-3.6-flash";
-
-const API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
-
-const SYSTEM_INSTRUCTION =
-  "당신은 한국 고등학교 영어 내신 교재를 만드는 전문 교사입니다. " +
-  "아래 지문을 분석해서 지시된 형식의 JSON으로만 출력하세요. " +
-  "설명, 마크다운, 코드블록 없이 순수 JSON만 반환합니다.";
+function escapeHtml(str = "") {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
 
 // ---------------------------------------------------------
-// 2. 공통 Gemini 호출 함수
+// CSS (passage-analysis 스킬과 동일한 색상 팔레트 사용)
+// 문법 = 빨강 #C00000, 어휘 = 파랑 #0070C0
 // ---------------------------------------------------------
-async function callGemini({ apiKey, model, prompt, schema }) {
-  const url = `${API_BASE}/${model}:generateContent?key=${apiKey}`;
+const CSS = `
+  @page { size: A4; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "NanumGothic", "Noto Sans KR", "Malgun Gothic", sans-serif;
+    color: #1a1a1a;
+    line-height: 1.6;
+    font-size: 11pt;
+  }
+  h1.wb-title { font-size: 18pt; margin: 0 0 4mm; }
+  .wb-meta { display:flex; gap: 12mm; font-size: 10pt; color:#555; margin-bottom: 8mm; border-bottom: 1.5px solid #333; padding-bottom: 4mm; }
+  .wb-meta span b { color:#111; }
 
-  const body = {
-    system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: schema,
-      temperature: 0.3,
-    },
-  };
+  section.step { page-break-before: always; }
+  section.step:first-of-type { page-break-before: auto; }
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+  .step-header { display:flex; align-items:baseline; gap: 6px; margin-bottom: 6mm; }
+  .step-badge {
+    display:inline-block; background:#222; color:#fff; font-weight:700;
+    font-size: 10pt; padding: 2px 10px; border-radius: 3px;
+  }
+  .step-title { font-size: 14pt; font-weight:700; }
+  .step-desc { font-size: 9.5pt; color:#666; margin-bottom: 6mm; }
+
+  /* Step 1: 해석 */
+  .sentence-block { margin-bottom: 6mm; }
+  .sentence-en { font-size: 11pt; }
+  .sentence-num { color:#0070C0; font-weight:700; margin-right: 4px; }
+  .answer-line { border-bottom: 1px solid #999; height: 7mm; margin-top: 2mm; }
+
+  /* Step 2: 빈칸 */
+  .passage-box { border:1px solid #ccc; border-radius:4px; padding:6mm; margin-bottom:6mm; background:#fafafa; }
+  .blank-tag {
+    display:inline-block; min-width: 22mm; border-bottom: 1.5px solid #333;
+    text-align:center; font-weight:700; color:#C00000; margin: 0 2px;
+  }
+  .sentence-hint-block { border:1px solid #ddd; border-radius:4px; padding:4mm 5mm; margin-bottom:4mm; }
+  .sentence-hint-ko { font-size: 10.5pt; color:#333; margin-bottom: 3mm; }
+  .blank-answer-row { display:flex; align-items:center; gap:8px; margin-bottom:2mm; font-size:10pt; }
+  .blank-num { font-weight:700; color:#0070C0; min-width:9mm; }
+  .blank-answer-line { flex:1; border-bottom:1px solid #999; height:6mm; max-width:80mm; }
+
+  /* Step 3: 순서 배열 */
+  .order-set { border:1px solid #ccc; border-radius:4px; padding:6mm; margin-bottom:6mm; }
+  .order-set h3 { margin:0 0 4mm; font-size:11.5pt; }
+  .order-sentence { display:flex; gap:6px; margin-bottom:3mm; align-items:flex-start; }
+  .order-box {
+    flex:0 0 10mm; height:8mm; border:1.5px solid #333; border-radius:3px;
+    display:flex; align-items:center; justify-content:center; font-weight:700;
+  }
+  .order-label { flex:0 0 6mm; font-weight:700; color:#0070C0; }
+
+  /* Step 4: 언스크램블 */
+  .unscramble-item { margin-bottom: 7mm; }
+  .unscramble-item .qnum { font-weight:700; color:#0070C0; margin-right:4px; }
+  .chunk-row { display:flex; flex-wrap:wrap; gap: 3mm; margin: 3mm 0; }
+  .chunk-box {
+    border:1.5px solid #333; border-radius:4px; padding: 2mm 4mm;
+    font-size: 10.5pt; background:#fff;
+  }
+
+  /* 정답지 */
+  .answer-key { page-break-before: always; }
+  .answer-key h2 { border-bottom: 2px solid #333; padding-bottom:2mm; }
+  .answer-key .ak-section { margin-bottom: 8mm; }
+  .answer-key .ak-section h3 { font-size:12pt; color:#333; }
+  .answer-key ol { padding-left: 18px; }
+  .answer-key li { margin-bottom: 2mm; }
+`;
+
+// ---------------------------------------------------------
+// 1단계 렌더링
+// ---------------------------------------------------------
+function renderStep1(step1) {
+  const items = step1.sentences
+    .map(
+      (s) => `
+      <div class="sentence-block">
+        <div class="sentence-en"><span class="sentence-num">${s.id}.</span>${escapeHtml(s.en)}</div>
+        <div class="answer-line"></div>
+      </div>`
+    )
+    .join("");
+
+  return `
+    <section class="step">
+      <div class="step-header"><span class="step-badge">STEP 1</span><span class="step-title">해석하기</span></div>
+      <div class="step-desc">각 문장을 읽고 빈 줄에 자연스러운 한글 해석을 쓰세요.</div>
+      ${items}
+    </section>`;
+}
+
+// ---------------------------------------------------------
+// 2단계 렌더링
+// ---------------------------------------------------------
+function renderStep2(step1, step2) {
+  // sentence_id -> 해당 문장에 들어갈 blank 목록
+  const blanksBySentence = {};
+  step2.blanks.forEach((b) => {
+    (blanksBySentence[b.sentence_id] ||= []).push(b);
   });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Gemini API 오류 (${res.status}): ${errText}`);
-  }
+  let blankCounter = 0;
+  const numberedBySentence = {}; // sentence_id -> [{num, ...blank}]
 
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) {
-    throw new Error("Gemini 응답에서 텍스트를 찾을 수 없습니다.");
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch (e) {
-    throw new Error(`JSON 파싱 실패: ${e.message}\n원본: ${text.slice(0, 500)}`);
-  }
-}
-
-// ---------------------------------------------------------
-// 4. 1단계: 해석하기
-// ---------------------------------------------------------
-const STEP1_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    sentences: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          id: { type: "INTEGER" },
-          en: { type: "STRING" },
-          ko: { type: "STRING" },
-        },
-        propertyOrdering: ["id", "en", "ko"],
-      },
-    },
-  },
-  propertyOrdering: ["sentences"],
-};
-
-export async function generateStep1({ passage, apiKey, model = DEFAULT_MODEL }) {
-  const prompt = `
-다음 영어 지문을 문장 단위로 분리하고, 각 문장에 대해 자연스러운 한글 해석(직역보다 의역 우선)을 작성하세요.
-문장 id는 1부터 순서대로 매기세요. 인용부호나 콜론으로 인한 문장 내 세부 구분은 하나의 문장으로 취급하세요.
-
-[지문]
-${passage}
-`.trim();
-
-  return callGemini({ apiKey, model, prompt, schema: STEP1_SCHEMA });
-}
-
-// ---------------------------------------------------------
-// 5. 2단계: 어법/어휘 빈칸
-// ---------------------------------------------------------
-const STEP2_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    blanks: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          sentence_id: { type: "INTEGER" },
-          answer: { type: "STRING" },
-          ko_hint: { type: "STRING" },
-          type: { type: "STRING", enum: ["grammar", "vocab"] },
-          grammar_point: { type: "STRING" },
-        },
-        propertyOrdering: [
-          "sentence_id",
-          "answer",
-          "ko_hint",
-          "type",
-          "grammar_point",
-        ],
-      },
-    },
-  },
-  propertyOrdering: ["blanks"],
-};
-
-// 문장 수 대략 세기 (마침표/느낌표/물음표 기준)
-function countSentencesRough(passage) {
-  const n = (passage.match(/[.!?][")]?(\s|$)/g) || []).length;
-  return Math.max(1, n);
-}
-
-// 빈칸 개수 = 문장당 최소 5개
-const MIN_BLANKS_PER_SENTENCE = 5;
-
-function calcBlankCount(passage) {
-  const sentenceCount = countSentencesRough(passage);
-  return sentenceCount * MIN_BLANKS_PER_SENTENCE;
-}
-
-export async function generateStep2({
-  passage,
-  apiKey,
-  model = DEFAULT_MODEL,
-  sentenceMap, // 1단계에서 만든 { id, en } 배열을 넘기면 sentence_id 정합성이 좋아짐
-}) {
-  const sentenceCount = sentenceMap ? sentenceMap.length : countSentencesRough(passage);
-  const blankCount = sentenceCount * MIN_BLANKS_PER_SENTENCE;
-  const grammarCount = Math.round(blankCount * 0.6);
-  const vocabCount = blankCount - grammarCount;
-
-  const prompt = `
-다음 영어 지문에서 내신 시험에 나올 만한 어법 포인트와 핵심 어휘를 골라 빈칸 문제를 만드세요.
-
-조건:
-- 지문은 총 ${sentenceCount}개의 문장으로 이루어져 있습니다. 문장마다 최소 ${MIN_BLANKS_PER_SENTENCE}개의 빈칸이 나오도록, 전체 빈칸 수를 약 ${blankCount}개(어법 포인트 약 ${grammarCount}개, 핵심 어휘 약 ${vocabCount}개)로 만드세요.
-- 문장이 짧아서 ${MIN_BLANKS_PER_SENTENCE}개를 채우기 어렵다면 그 문장에서 가능한 한 최대한 많은 단어/표현을 빈칸으로 만드세요 (전치사, 접속사, 관사, 조동사 등도 빈칸 후보로 적극 활용).
-- 각 빈칸은 지문에 실제로 등장하는 단어/표현이어야 합니다 (answer).
-- ko_hint에는 answer에 대응하는 한글 뜻을 제시하세요 (학생은 이 뜻을 보고 answer를 영어로 채워 씁니다).
-- type이 "grammar"인 경우 grammar_point에 해당 어법 이름(예: "관계대명사 계속적 용법")을 적으세요. type이 "vocab"이면 grammar_point는 빈 문자열로 두세요.
-- sentence_id는 해당 표현이 포함된 문장 번호입니다 (1부터 시작, 지문 순서대로).
-
-[지문]
-${passage}
-`.trim();
-
-  return callGemini({ apiKey, model, prompt, schema: STEP2_SCHEMA });
-}
-
-// ---------------------------------------------------------
-// 6. 3단계: 문단별 문장 순서 배열
-// ---------------------------------------------------------
-const STEP3_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    sets: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          paragraph_id: { type: "INTEGER" },
-          correct_order: {
-            type: "ARRAY",
-            items: { type: "STRING" }, // display_id 순서, 예: ["B","A","C"]
-          },
-          shuffled_sentences: {
-            type: "ARRAY",
-            items: {
-              type: "OBJECT",
-              properties: {
-                display_id: { type: "STRING" },
-                text: { type: "STRING" },
-              },
-              propertyOrdering: ["display_id", "text"],
-            },
-          },
-        },
-        propertyOrdering: ["paragraph_id", "correct_order", "shuffled_sentences"],
-      },
-    },
-  },
-  propertyOrdering: ["sets"],
-};
-
-// 문단 분리 + 4문장 미만 문단은 인접 문단과 합치기 (LLM에 맡기지 않고 전처리)
-function splitParagraphs(passage) {
-  const raw = passage
-    .split(/\n\s*\n/)
-    .map((p) => p.trim())
-    .filter(Boolean);
-
-  const paragraphs = raw.length > 0 ? raw : [passage.trim()];
-
-  const countSentences = (p) =>
-    (p.match(/[.!?][")]?(\s|$)/g) || []).length || 1;
-
-  const merged = [];
-  for (const p of paragraphs) {
-    if (
-      merged.length > 0 &&
-      countSentences(p) < 4 &&
-      countSentences(merged[merged.length - 1]) < 8
-    ) {
-      merged[merged.length - 1] = merged[merged.length - 1] + " " + p;
-    } else {
-      merged.push(p);
-    }
-  }
-  // 맨 앞 문단이 짧게 혼자 남은 경우 다음 문단과 합치기
-  if (merged.length > 1 && countSentences(merged[0]) < 4) {
-    merged[1] = merged[0] + " " + merged[1];
-    merged.shift();
-  }
-  return merged;
-}
-
-export async function generateStep3({ passage, apiKey, model = DEFAULT_MODEL }) {
-  const paragraphs = splitParagraphs(passage);
-
-  const results = await Promise.all(
-    paragraphs.map((paragraphText, idx) => {
-      const prompt = `
-다음은 지문의 한 문단입니다. 이 문단을 문장 단위로 분리한 뒤, 순서를 무작위로 섞어서 제시하세요.
-학생은 섞인 문장을 원래 순서대로 재배열하는 문제를 풀게 됩니다.
-
-조건:
-- display_id는 A, B, C... 알파벳으로 shuffled_sentences 각 항목에 부여하세요 (섞인 순서 그대로).
-- correct_order에는 display_id를 원래(정답) 순서대로 나열하세요.
-- 문장이 4개 미만이면 억지로 쪼개지 말고 있는 그대로 사용하세요.
-
-[문단 ${idx + 1}]
-${paragraphText}
-`.trim();
-
-      return callGemini({
-        apiKey,
-        model,
-        prompt,
-        schema: {
-          type: "OBJECT",
-          properties: {
-            correct_order: { type: "ARRAY", items: { type: "STRING" } },
-            shuffled_sentences: {
-              type: "ARRAY",
-              items: {
-                type: "OBJECT",
-                properties: {
-                  display_id: { type: "STRING" },
-                  text: { type: "STRING" },
-                },
-                propertyOrdering: ["display_id", "text"],
-              },
-            },
-          },
-          propertyOrdering: ["correct_order", "shuffled_sentences"],
-        },
-      }).then((r) => ({ paragraph_id: idx + 1, ...r }));
+  const passageHtml = step1.sentences
+    .map((s) => {
+      let text = escapeHtml(s.en);
+      const blanksHere = blanksBySentence[s.id] || [];
+      blanksHere.forEach((b) => {
+        blankCounter += 1;
+        (numberedBySentence[s.id] ||= []).push({ ...b, num: blankCounter });
+        const re = new RegExp(
+          b.answer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+          "i"
+        );
+        text = text.replace(
+          re,
+          `<span class="blank-tag">(${blankCounter})</span>`
+        );
+      });
+      return `${s.id}. ${text}`;
     })
-  );
+    .join(" ");
 
-  return { sets: results };
+  // 문장 단위로 그룹: 해당 문장 전체 해석 1번 + 그 문장에 속한 빈칸들
+  const sentenceBlocks = step1.sentences
+    .filter((s) => numberedBySentence[s.id])
+    .map((s) => {
+      const blanksInSentence = numberedBySentence[s.id];
+      const blankRows = blanksInSentence
+        .map(
+          (b) => `
+          <div class="blank-answer-row">
+            <span class="blank-num">(${b.num})</span>
+            <span class="blank-answer-line"></span>
+          </div>`
+        )
+        .join("");
+
+      return `
+        <div class="sentence-hint-block">
+          <div class="sentence-hint-ko">${s.id}. ${escapeHtml(s.ko)}</div>
+          ${blankRows}
+        </div>`;
+    })
+    .join("");
+
+  return `
+    <section class="step">
+      <div class="step-header"><span class="step-badge">STEP 2</span><span class="step-title">빈칸 채우기</span></div>
+      <div class="step-desc">아래 문장 전체 해석을 참고해서, 위 지문의 빈칸에 알맞은 영어 단어/표현을 쓰세요.</div>
+      <div class="passage-box">${passageHtml}</div>
+      ${sentenceBlocks}
+    </section>`;
 }
 
 // ---------------------------------------------------------
-// 7. 4단계: 언스크램블 (관사+수식어+명사 한 덩어리)
+// 3단계 렌더링
 // ---------------------------------------------------------
-const STEP4_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    unscramble: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          sentence_id: { type: "INTEGER" },
-          correct_chunks: { type: "ARRAY", items: { type: "STRING" } },
-          shuffled_chunks: { type: "ARRAY", items: { type: "STRING" } },
-        },
-        propertyOrdering: ["sentence_id", "correct_chunks", "shuffled_chunks"],
-      },
-    },
-  },
-  propertyOrdering: ["unscramble"],
-};
+function renderStep3(step3) {
+  const sets = step3.sets
+    .map((set) => {
+      const rows = set.shuffled_sentences
+        .map(
+          (s) => `
+        <div class="order-sentence">
+          <div class="order-label">${s.display_id}</div>
+          <div>${escapeHtml(s.text)}</div>
+        </div>`
+        )
+        .join("");
 
-export async function generateStep4({ passage, apiKey, model = DEFAULT_MODEL }) {
-  const prompt = `
-다음 영어 지문의 모든 문장에 대해 언스크램블(어순 배열) 문제를 만드세요.
+      const orderBoxes = set.shuffled_sentences
+        .map(() => `<div class="order-box"></div>`)
+        .join("");
 
-청크 분리 규칙:
-- 관사(a/an/the)는 뒤에 오는 형용사·명사(구)와 반드시 하나의 청크로 묶습니다 (예: "the beautiful girl"은 한 덩어리이며, 절대 "the" / "beautiful" / "girl"로 따로 쪼개지 않습니다).
-- 전치사+명사구도 가능하면 하나의 청크로 묶으세요 (예: "in the morning").
-- 조동사+본동사 등 동사구는 분리하지 않습니다.
-- 문장당 청크는 최소 3개, 최대 8개가 되도록 조정하세요.
-- shuffled_chunks는 correct_chunks를 무작위로 섞은 배열입니다 (섞인 순서가 원래 순서와 완전히 같으면 안 됩니다).
-- sentence_id는 지문 순서대로 1부터 매기세요 (문장 하나당 하나의 unscramble 항목).
+      return `
+        <div class="order-set">
+          <h3>문단 ${set.paragraph_id}</h3>
+          ${rows}
+          <div style="margin-top:4mm; font-size:10pt; color:#555;">순서 (①→⑥):</div>
+          <div style="display:flex; gap:4mm; margin-top:2mm;">${orderBoxes}</div>
+        </div>`;
+    })
+    .join("");
 
-[지문]
-${passage}
-`.trim();
-
-  return callGemini({ apiKey, model, prompt, schema: STEP4_SCHEMA });
+  return `
+    <section class="step">
+      <div class="step-header"><span class="step-badge">STEP 3</span><span class="step-title">문장 순서 배열</span></div>
+      <div class="step-desc">각 문단의 문장을 원래 순서대로 아래 빈칸에 기호(A, B, C...)로 쓰세요.</div>
+      ${sets}
+    </section>`;
 }
 
 // ---------------------------------------------------------
-// 8. 전체 워크북 생성 (4단계 한 번에)
+// 4단계 렌더링
 // ---------------------------------------------------------
-export async function generateWorkbook({ passage, apiKey, model = DEFAULT_MODEL, onProgress }) {
-  const report = (step) => onProgress && onProgress(step);
+function renderStep4(step4) {
+  const items = step4.unscramble
+    .map((u) => {
+      const chunks = u.shuffled_chunks
+        .map((c) => `<div class="chunk-box">${escapeHtml(c)}</div>`)
+        .join("");
+      return `
+        <div class="unscramble-item">
+          <div><span class="qnum">${u.sentence_id}.</span>아래 어구를 바르게 배열해서 문장을 완성하세요.</div>
+          <div class="chunk-row">${chunks}</div>
+          <div class="answer-line"></div>
+        </div>`;
+    })
+    .join("");
 
-  report({ step: 1, status: "start" });
-  const step1 = await generateStep1({ passage, apiKey, model });
-  report({ step: 1, status: "done" });
+  return `
+    <section class="step">
+      <div class="step-header"><span class="step-badge">STEP 4</span><span class="step-title">어순 배열 (언스크램블)</span></div>
+      <div class="step-desc">관사와 명사(구)는 하나의 어구로 묶여 있습니다. 어구를 바르게 배열해서 문장을 완성하세요.</div>
+      ${items}
+    </section>`;
+}
 
-  report({ step: 2, status: "start" });
-  const step2 = await generateStep2({
-    passage,
-    apiKey,
-    model,
-    sentenceMap: step1.sentences,
-  });
-  report({ step: 2, status: "done" });
+// ---------------------------------------------------------
+// 정답지 렌더링
+// ---------------------------------------------------------
+function renderAnswerKey(workbook) {
+  const { step1_translation, step2_blanks, step3_ordering, step4_unscramble } = workbook;
 
-  report({ step: 3, status: "start" });
-  const step3 = await generateStep3({ passage, apiKey, model });
-  report({ step: 3, status: "done" });
+  const step1List = step1_translation.sentences
+    .map((s) => `<li>${s.id}. ${escapeHtml(s.ko)}</li>`)
+    .join("");
 
-  report({ step: 4, status: "start" });
-  const step4 = await generateStep4({ passage, apiKey, model });
-  report({ step: 4, status: "done" });
+  let n = 0;
+  const step2List = step2_blanks.blanks
+    .map((b) => {
+      n += 1;
+      return `<li>${n}. <b>${escapeHtml(b.answer)}</b> (${b.type === "grammar" ? "어법" : "어휘"}${b.grammar_point ? `: ${escapeHtml(b.grammar_point)}` : ""})</li>`;
+    })
+    .join("");
 
-  return {
-    passage,
-    model,
-    step1_translation: step1,
-    step2_blanks: step2,
-    step3_ordering: step3,
-    step4_unscramble: step4,
-  };
+  const step3List = step3_ordering.sets
+    .map((set) => `<li>문단 ${set.paragraph_id}: ${set.correct_order.join(" → ")}</li>`)
+    .join("");
+
+  const step4List = step4_unscramble.unscramble
+    .map((u) => `<li>${u.sentence_id}. ${escapeHtml(u.correct_chunks.join(" "))}</li>`)
+    .join("");
+
+  return `
+    <section class="answer-key">
+      <h2>정답 (교사용)</h2>
+      <div class="ak-section"><h3>STEP 1 해석</h3><ol>${step1List}</ol></div>
+      <div class="ak-section"><h3>STEP 2 빈칸</h3><ol>${step2List}</ol></div>
+      <div class="ak-section"><h3>STEP 3 순서 배열</h3><ol>${step3List}</ol></div>
+      <div class="ak-section"><h3>STEP 4 어순 배열</h3><ol>${step4List}</ol></div>
+    </section>`;
+}
+
+// ---------------------------------------------------------
+// 전체 문서 렌더링
+// ---------------------------------------------------------
+export function renderWorkbookHTML(workbook, { title = "영어 지문 워크북", includeAnswerKey = true } = {}) {
+  const body = [
+    renderStep1(workbook.step1_translation),
+    renderStep2(workbook.step1_translation, workbook.step2_blanks),
+    renderStep3(workbook.step3_ordering),
+    renderStep4(workbook.step4_unscramble),
+    includeAnswerKey ? renderAnswerKey(workbook) : "",
+  ].join("\n");
+
+  return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>${escapeHtml(title)}</title>
+  <style>${CSS}</style>
+</head>
+<body>
+  <h1 class="wb-title">${escapeHtml(title)}</h1>
+  <div class="wb-meta">
+    <span>이름: <b>______________</b></span>
+    <span>날짜: <b>______________</b></span>
+  </div>
+  ${body}
+</body>
+</html>`;
 }
