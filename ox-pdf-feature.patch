@@ -1,0 +1,379 @@
+diff --git a/app/__pycache__/__init__.cpython-312.pyc b/app/__pycache__/__init__.cpython-312.pyc
+new file mode 100644
+index 0000000..92dca6f
+Binary files /dev/null and b/app/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/app/__pycache__/main.cpython-312.pyc b/app/__pycache__/main.cpython-312.pyc
+new file mode 100644
+index 0000000..c063001
+Binary files /dev/null and b/app/__pycache__/main.cpython-312.pyc differ
+diff --git a/app/__pycache__/prompt.cpython-312.pyc b/app/__pycache__/prompt.cpython-312.pyc
+new file mode 100644
+index 0000000..f926510
+Binary files /dev/null and b/app/__pycache__/prompt.cpython-312.pyc differ
+diff --git a/app/__pycache__/render.cpython-312.pyc b/app/__pycache__/render.cpython-312.pyc
+new file mode 100644
+index 0000000..b64621f
+Binary files /dev/null and b/app/__pycache__/render.cpython-312.pyc differ
+diff --git a/app/__pycache__/schemas.cpython-312.pyc b/app/__pycache__/schemas.cpython-312.pyc
+new file mode 100644
+index 0000000..69384d8
+Binary files /dev/null and b/app/__pycache__/schemas.cpython-312.pyc differ
+diff --git a/app/__pycache__/thesaurus.cpython-312.pyc b/app/__pycache__/thesaurus.cpython-312.pyc
+new file mode 100644
+index 0000000..abdd30f
+Binary files /dev/null and b/app/__pycache__/thesaurus.cpython-312.pyc differ
+diff --git a/app/main.py b/app/main.py
+index 5b5afc1..0a6d6f1 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -8,8 +8,8 @@ from fastapi.staticfiles import StaticFiles
+ from pydantic import BaseModel
+ 
+ from .prompt import build_system_prompt, MODEL
+-from .schemas import AnalysisResponse
+-from .render import render_pdf
++from .schemas import AnalysisResponse, ComprehensionRequest
++from .render import render_pdf, render_comprehension_pdf
+ from .thesaurus import enrich_vocabulary
+ 
+ app = FastAPI(title="영어 학습자료 제작소")
+@@ -74,12 +74,23 @@ def render(analysis: AnalysisResponse):
+     return RenderResponse(job_id=job_id, download_url=f"/download/{job_id}")
+ 
+ 
++@app.post("/render-comprehension", response_model=RenderResponse)
++def render_comprehension(req: ComprehensionRequest):
++    """브라우저에서 이미 Gemini로 O/X 문제까지 만든 JSON을 받아 PDF로 렌더링한다.
++    이 엔드포인트도 LLM을 호출하지 않으므로 API 키가 필요 없다."""
++    job_id = f"ox-{uuid.uuid4()}"
++    pdf_path = OUTPUT_DIR / f"{job_id}.pdf"
++    render_comprehension_pdf(req, str(pdf_path))
++    return RenderResponse(job_id=job_id, download_url=f"/download/{job_id}")
++
++
+ @app.get("/download/{job_id}")
+ def download(job_id: str):
+     pdf_path = OUTPUT_DIR / f"{job_id}.pdf"
+     if not pdf_path.exists():
+         raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
+-    return FileResponse(pdf_path, media_type="application/pdf", filename="구문분석_상세분석본.pdf")
++    filename = "OX_워크북.pdf" if job_id.startswith("ox-") else "구문분석_상세분석본.pdf"
++    return FileResponse(pdf_path, media_type="application/pdf", filename=filename)
+ 
+ 
+ @app.get("/health")
+diff --git a/app/render.py b/app/render.py
+index e2148b6..8d50335 100644
+--- a/app/render.py
++++ b/app/render.py
+@@ -1,7 +1,8 @@
++import html
+ from pathlib import Path
+ from jinja2 import Environment, FileSystemLoader
+ from weasyprint import HTML
+-from .schemas import AnalysisResponse
++from .schemas import AnalysisResponse, ComprehensionRequest
+ 
+ TEMPLATE_DIR = Path(__file__).parent / "templates"
+ 
+@@ -29,3 +30,34 @@ def render_pdf(analysis: AnalysisResponse, output_path: str) -> str:
+     html_str = render_html(analysis)
+     HTML(string=html_str).write_pdf(output_path)
+     return output_path
++
++
++def _esc(s: str | None) -> str | None:
++    return html.escape(s) if s is not None else None
++
++
++def render_comprehension_html(req: ComprehensionRequest) -> str:
++    """OX 워크북 결과(브라우저에서 이미 Gemini로 생성한 JSON)를 인쇄용 PDF HTML로 렌더링.
++    passage.html.j2와 달리 이쪽은 사용자가 붙여넣은 순수 텍스트만 다루므로 escape 처리한다."""
++    template = _env.get_template("comprehension.html.j2")
++    group_a = [{"num": it.num, "text": _esc(it.text), "answer": it.answer} for it in req.groupA]
++    group_b = [{"num": it.num, "text": _esc(it.text), "answer": it.answer} for it in req.groupB]
++    ko_range = f"01~{req.groupA[-1].num}"
++    en_range = f"{req.groupB[0].num}~{req.groupB[-1].num}"
++    return template.render(
++        title_ko=_esc(req.titleKo),
++        title_en=_esc(req.titleEn),
++        source=_esc(req.source),
++        passage=_esc(req.passage),
++        group_a=group_a,
++        group_b=group_b,
++        ko_range=ko_range,
++        en_range=en_range,
++        watermark=req.watermark,
++    )
++
++
++def render_comprehension_pdf(req: ComprehensionRequest, output_path: str) -> str:
++    html_str = render_comprehension_html(req)
++    HTML(string=html_str).write_pdf(output_path)
++    return output_path
+diff --git a/app/schemas.py b/app/schemas.py
+index e8ea980..e8eaf82 100644
+--- a/app/schemas.py
++++ b/app/schemas.py
+@@ -87,3 +87,22 @@ class PassageAnalysis(BaseModel):
+ # Claude에게 요구할 최종 JSON의 최상위 형태 (여러 지문을 한 번에 받을 수도 있게)
+ class AnalysisResponse(BaseModel):
+     passages: list[PassageAnalysis] = Field(min_length=1)
++
++
++# ---- OX 리딩 워크북 (comprehension) PDF 렌더링용 스키마 ----
++# 브라우저가 Gemini로 문제를 만든 "이후"의 결과 JSON + 화면에서 입력한 부가 정보를 그대로 받아서
++# WeasyPrint로 PDF를 찍어낸다. 여기도 LLM을 호출하지 않으므로 API 키가 필요 없다.
++class ComprehensionItem(BaseModel):
++    num: str
++    text: str
++    answer: Literal["O", "X"]
++
++
++class ComprehensionRequest(BaseModel):
++    titleKo: str
++    titleEn: str
++    groupA: list[ComprehensionItem] = Field(min_length=1)
++    groupB: list[ComprehensionItem] = Field(min_length=1)
++    passage: str
++    source: Optional[str] = None
++    watermark: Optional[str] = None  # data:image/... base64 URL, 선택
+diff --git a/app/templates/comprehension.html.j2 b/app/templates/comprehension.html.j2
+new file mode 100644
+index 0000000..2ea4919
+--- /dev/null
++++ b/app/templates/comprehension.html.j2
+@@ -0,0 +1,99 @@
++<!DOCTYPE html>
++<html lang="ko">
++<head>
++<meta charset="UTF-8">
++<style>
++  @page { size: A4; margin: 16mm 14mm 18mm 14mm; }
++  * { box-sizing: border-box; }
++  body {
++    font-family: "Noto Serif KR", "Noto Sans CJK KR", serif;
++    color: #232019;
++    font-size: 10.5pt;
++    line-height: 1.6;
++    position: relative;
++  }
++  {% if watermark %}
++  .watermark {
++    position: fixed;
++    top: 0; left: 0; right: 0; bottom: 0;
++    background-image: url("{{ watermark }}");
++    background-repeat: repeat;
++    background-position: top left;
++    background-size: 90mm 90mm;
++    opacity: 0.12;
++    z-index: -1;
++  }
++  {% endif %}
++  .stamp-badge {
++    display:inline-block; border:1.5px solid #2F5233; color:#2F5233;
++    font-family:"Courier New",monospace; font-size:8pt; letter-spacing:.08em;
++    padding:2px 8px; border-radius:14px; margin-bottom:10px;
++  }
++  h1 { font-size:17pt; font-weight:400; margin:0 0 2px; }
++  .sub { font-size:9.5pt; color:#726C60; margin:0 0 14px; }
++  .instr { font-size:9.5pt; font-weight:700; margin:16px 0 8px; }
++  .passage-box {
++    background:#FBF8F1; border:1px solid #DDD6C4; border-radius:3px;
++    padding:10mm 11mm; font-size:10pt; line-height:1.75; margin-bottom:2mm;
++  }
++  .item {
++    display:table; width:100%; padding:5px 0;
++    border-bottom:1px dashed #DDD6C4; font-size:10pt; line-height:1.55;
++  }
++  .item:last-child { border-bottom:none; }
++  .num-cell { display:table-cell; width:7mm; vertical-align:top; color:#2F5233; font-weight:700; font-family:"Courier New",monospace; }
++  .text-cell { display:table-cell; vertical-align:top; padding-right:4mm; }
++  .item.en .text-cell { font-style:italic; }
++  .ox-cell { display:table-cell; width:16mm; vertical-align:top; text-align:right; font-family:"Courier New",monospace; font-size:9pt; color:#aaa; }
++
++  .key-page { page-break-before: always; }
++  .key-title { font-size:15pt; font-weight:400; margin:0 0 3px; }
++  .key-sub { font-size:9pt; color:#726C60; font-family:"Courier New",monospace; margin:0 0 14px; }
++  .key-grid {
++    display:flex; flex-wrap:wrap; gap:8px 4px;
++    font-family:"Courier New",monospace; font-size:9.5pt;
++  }
++  .key-grid span { display:inline-block; width:16mm; }
++  .key-grid b { color:#2F5233; margin-right:3px; }
++</style>
++</head>
++<body>
++{% if watermark %}<div class="watermark"></div>{% endif %}
++
++{% if source %}<span class="stamp-badge">{{ source }}</span>{% endif %}
++<h1>{{ title_ko }}</h1>
++<p class="sub">{{ title_en }}</p>
++
++<div class="instr">다음 글을 읽고 물음에 답하시오.</div>
++<div class="passage-box">{{ passage }}</div>
++
++<div class="instr">{{ ko_range }}&nbsp;&nbsp;글의 내용과 일치하면 O, 일치하지 않으면 X를 고르시오.</div>
++{% for it in group_a %}
++<div class="item">
++  <span class="num-cell">{{ it.num }}</span>
++  <span class="text-cell">{{ it.text }}</span>
++  <span class="ox-cell">O&nbsp;&nbsp;X</span>
++</div>
++{% endfor %}
++
++<div class="instr">{{ en_range }}&nbsp;&nbsp;Choose O if the statement matches the passage, or X if it does not.</div>
++{% for it in group_b %}
++<div class="item en">
++  <span class="num-cell">{{ it.num }}</span>
++  <span class="text-cell">{{ it.text }}</span>
++  <span class="ox-cell">O&nbsp;&nbsp;X</span>
++</div>
++{% endfor %}
++
++<div class="key-page">
++  <div class="key-title">정답 (Answer Key)</div>
++  <div class="key-sub">{% if source %}{{ source }} · {% endif %}{{ title_ko }}</div>
++  <div class="key-grid">
++    {% for it in group_a + group_b %}
++    <span><b>{{ it.num }}</b>{{ it.answer }}</span>
++    {% endfor %}
++  </div>
++</div>
++
++</body>
++</html>
+diff --git a/combined/index.html b/combined/index.html
+index 5cc1c14..7c43ad1 100644
+--- a/combined/index.html
++++ b/combined/index.html
+@@ -238,6 +238,43 @@ async function runOxWorkbook(apiKey, model, passage, numKo, numEn){
+     html += `<div class="ox-item"><b>${it.num}</b>${escapeHtml(it.text)} (${it.answer})</div>`;
+   });
+   oxPreview.innerHTML = html;
++
++  // 실제 PDF 생성 (passage-analyzer와 동일한 서버 렌더링 방식)
++  const oxCard = document.getElementById('oxCard');
++  const pdfStatusLine = document.createElement('p');
++  pdfStatusLine.id = 'oxPdfStatus';
++  pdfStatusLine.textContent = 'PDF로 렌더링하는 중...';
++  oxCard.insertBefore(pdfStatusLine, oxPreview);
++
++  try {
++    const renderRes = await fetch('/render-comprehension', {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({
++        titleKo: parsed.titleKo,
++        titleEn: parsed.titleEn,
++        groupA: parsed.groupA,
++        groupB: parsed.groupB,
++        passage,
++        source: null,
++        watermark: null
++      })
++    });
++    if (!renderRes.ok) {
++      const err = await renderRes.json().catch(() => ({}));
++      throw new Error(err.detail ? JSON.stringify(err.detail) : `렌더링 서버 오류 (${renderRes.status})`);
++    }
++    const renderData = await renderRes.json();
++    pdfStatusLine.remove();
++    const link = document.createElement('a');
++    link.className = 'dl';
++    link.href = renderData.download_url;
++    link.target = '_blank';
++    link.textContent = '📄 OX 워크북 PDF 다운로드';
++    oxCard.insertBefore(link, oxPreview);
++  } catch (e) {
++    pdfStatusLine.textContent = 'PDF 생성 오류: ' + e.message;
++  }
+ }
+ 
+ document.getElementById('go').addEventListener('click', async () => {
+diff --git a/comprehension/index.html b/comprehension/index.html
+index dfb7d60..5d3f2f0 100644
+--- a/comprehension/index.html
++++ b/comprehension/index.html
+@@ -236,6 +236,11 @@ const errEl = document.getElementById('err');
+ const apikeyEl = document.getElementById('apikey');
+ const rememberEl = document.getElementById('remember');
+ 
++// 마지막으로 생성된 워크북 데이터 (PDF 다운로드 버튼이 참조)
++let lastData = null;
++let lastPassage = '';
++let lastSource = '';
++
+ // 저장된 키가 있으면 불러오기 (이 브라우저에만 저장됨, 서버로 전송되지 않음)
+ const savedKey = localStorage.getItem('ox_gemini_key');
+ if (savedKey) { apikeyEl.value = savedKey; rememberEl.checked = true; }
+@@ -398,6 +403,10 @@ async function generate(){
+ }
+ 
+ function render(data, passage, source){
++  lastData = data;
++  lastPassage = passage;
++  lastSource = source;
++
+   const items = [...data.groupA, ...data.groupB];
+   const koRange = `01~${data.groupA[data.groupA.length-1].num}`;
+   const enRange = `${data.groupB[0].num}~${data.groupB[data.groupB.length-1].num}`;
+@@ -419,8 +428,10 @@ function render(data, passage, source){
+ 
+   html += `<div class="toolbar">
+     <button onclick="toggleKey()">정답 보기 / 숨기기</button>
+-    <button onclick="window.print()">인쇄 / PDF 저장</button>
+-  </div>`;
++    <button onclick="window.print()">인쇄 (브라우저)</button>
++    <button id="pdfBtn" onclick="generatePdf()">PDF 생성</button>
++  </div>
++  <p class="hint" id="pdfStatus" style="display:none;"></p>`;
+   html += `<div class="key" id="answerKey">
+     <h3>정답 (Answer Key)</h3>
+     <p class="key-sub">${source ? escapeHtml(source) + ' · ' : ''}${escapeHtml(data.titleKo)}</p>
+@@ -451,6 +462,45 @@ function toggleKey(){
+   document.getElementById('answerKey').classList.toggle('show');
+ }
+ 
++async function generatePdf(){
++  if(!lastData) return;
++  const pdfBtn = document.getElementById('pdfBtn');
++  const statusEl = document.getElementById('pdfStatus');
++  pdfBtn.disabled = true;
++  pdfBtn.textContent = 'PDF 만드는 중...';
++  statusEl.style.display = 'block';
++  statusEl.textContent = '서버에서 PDF를 렌더링하고 있어요...';
++
++  try{
++    const resp = await fetch('/render-comprehension', {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json' },
++      body: JSON.stringify({
++        titleKo: lastData.titleKo,
++        titleEn: lastData.titleEn,
++        groupA: lastData.groupA,
++        groupB: lastData.groupB,
++        passage: lastPassage,
++        source: lastSource || null,
++        watermark: localStorage.getItem('ox_watermark_tile') || null
++      })
++    });
++    if(!resp.ok){
++      const err = await resp.json().catch(() => ({}));
++      throw new Error(err.detail ? JSON.stringify(err.detail) : `렌더링 서버 오류 (${resp.status})`);
++    }
++    const data = await resp.json();
++    statusEl.innerHTML = `<a href="${data.download_url}" target="_blank" rel="noopener">📄 PDF 다운로드</a>`;
++    window.open(data.download_url, '_blank');
++  }catch(e){
++    console.error(e);
++    statusEl.textContent = 'PDF 생성 중 오류: ' + e.message;
++  }finally{
++    pdfBtn.disabled = false;
++    pdfBtn.textContent = 'PDF 생성';
++  }
++}
++
+ function escapeHtml(s){
+   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ }
