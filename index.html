@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARAXDNA — 지문 하나로 구문분석 + OX 워크북</title>
+<style>
+  :root{
+    --ink:#241220;
+    --paper:#fff7fb;
+    --rule:#f6cfe3;
+    --pink:#ff2e93;
+    --pink-dark:#c40067;
+    --card:#ffffff;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:"Noto Serif KR","Georgia",serif;}
+  .wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px;}
+  .eyebrow{font-family:"Courier New",monospace;font-size:12px;letter-spacing:.12em;color:var(--pink-dark);text-transform:uppercase;margin:0 0 12px;}
+  h1{font-size:clamp(24px,5vw,36px);margin:0 0 12px;}
+  p.lead{font-size:15px;line-height:1.7;color:#5b4a56;margin:0 0 32px;}
+  label{display:block;font-family:"Courier New",monospace;font-size:12px;color:var(--pink-dark);margin:20px 0 6px;text-transform:uppercase;letter-spacing:.06em;}
+  input[type=text], input[type=password], input[type=number], textarea, select{
+    width:100%;padding:10px 12px;border:1px solid var(--rule);border-radius:6px;
+    font-family:inherit;font-size:14px;background:var(--card);color:var(--ink);
+  }
+  textarea{min-height:160px;resize:vertical;}
+  .row{display:flex;gap:16px;}
+  .row > div{flex:1;}
+  .toggle{font-family:"Courier New",monospace;font-size:12px;color:var(--pink-dark);cursor:pointer;margin-top:4px;display:inline-block;}
+  button#go{
+    margin-top:28px;width:100%;padding:14px;border:none;border-radius:6px;
+    background:var(--pink);color:#fff;font-family:"Courier New",monospace;font-size:14px;
+    font-weight:bold;letter-spacing:.04em;cursor:pointer;
+  }
+  button#go:disabled{opacity:.5;cursor:default;}
+  .status{margin-top:16px;font-size:13px;color:#5b4a56;min-height:1.2em;}
+  .err{margin-top:8px;font-size:13px;color:var(--pink-dark);display:none;}
+  .results{margin-top:40px;display:grid;grid-template-columns:1fr 1fr;gap:20px;}
+  @media (max-width:600px){.results{grid-template-columns:1fr;}.row{flex-direction:column;}}
+  .result-card{background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:20px;}
+  .result-card h3{margin:0 0 8px;font-size:16px;}
+  .result-card p{font-size:13px;color:#6b5a66;margin:0 0 14px;}
+  .result-card a.dl{display:inline-block;font-family:"Courier New",monospace;font-size:13px;color:var(--pink-dark);font-weight:bold;}
+  .ox-preview{white-space:pre-wrap;font-size:13px;line-height:1.6;max-height:260px;overflow:auto;border-top:1px solid var(--rule);padding-top:12px;margin-top:12px;}
+  .ox-item{margin-bottom:6px;}
+  .ox-item b{color:var(--pink-dark);margin-right:6px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">ARAXDNA · one pass</p>
+  <h1>지문 하나로 구문분석 PDF + OX 워크북</h1>
+  <p class="lead">지문을 한 번만 넣으면 구문분석 PDF와 O/X 워크북이 동시에 만들어집니다.
+    Google Gemini API 키 하나만 있으면 됩니다 (<a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--pink-dark)">무료 발급</a>).
+    키는 이 브라우저에만 저장되고 서버로는 전송되지 않습니다.</p>
+
+  <label>Gemini API 키</label>
+  <input type="password" id="apiKey" placeholder="AIza...">
+  <span class="toggle" id="toggleKey">키 표시/숨기기</span>
+
+  <label>지문</label>
+  <textarea id="passage" placeholder="여기에 영어 지문을 붙여넣으세요"></textarea>
+
+  <div class="row">
+    <div>
+      <label>지문 번호 (구문분석 PDF용)</label>
+      <input type="number" id="passageIndex" value="1" min="1">
+    </div>
+    <div>
+      <label>목표 어법 (선택)</label>
+      <input type="text" id="targetGrammar" placeholder="예: 가정법 도치, 분사구문">
+    </div>
+  </div>
+
+  <div class="row">
+    <div>
+      <label>한글 OX 문항 수</label>
+      <input type="number" id="numKo" value="10" min="1" max="20">
+    </div>
+    <div>
+      <label>영어 OX 문항 수</label>
+      <input type="number" id="numEn" value="5" min="1" max="20">
+    </div>
+  </div>
+
+  <label>Gemini 모델</label>
+  <select id="modelSelect">
+    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite (가볍고 무료 등급 친화적)</option>
+    <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite (더 빠르고 저렴한 최신 경량 모델)</option>
+    <option value="gemini-3.6-flash">Gemini 3.6 Flash (품질 가장 좋음, 결제 등록 권장)</option>
+  </select>
+
+  <button id="go">분석 + 워크북 생성하기</button>
+  <div class="status" id="status"></div>
+  <div class="err" id="err"></div>
+
+  <div class="results" id="results" style="display:none;">
+    <div class="result-card" id="pdfCard">
+      <h3>구문분석 PDF</h3>
+      <p id="pdfStatus">대기 중...</p>
+    </div>
+    <div class="result-card" id="oxCard">
+      <h3>OX 워크북</h3>
+      <p id="oxStatus">대기 중...</p>
+      <div class="ox-preview" id="oxPreview" style="display:none;"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const apiKeyEl = document.getElementById('apiKey');
+const KEY_STORAGE = 'araxdna-gemini-key';
+apiKeyEl.value = localStorage.getItem(KEY_STORAGE) || '';
+apiKeyEl.addEventListener('input', () => localStorage.setItem(KEY_STORAGE, apiKeyEl.value.trim()));
+document.getElementById('toggleKey').addEventListener('click', () => {
+  apiKeyEl.type = apiKeyEl.type === 'password' ? 'text' : 'password';
+});
+
+function stripCodeFence(text){
+  let t = text.trim();
+  if (t.startsWith('```')) t = t.replace(/^```(json)?/, '').replace(/```$/, '').trim();
+  return t;
+}
+
+// ---- 구문분석 (기존 passage-analyzer 로직) ----
+async function callGeminiForAnalysis(apiKey, systemPrompt, model, maxTokens, passageText, passageIndex, targetGrammar, responseJsonSchema){
+  const lines = [`다음 지문을 분석해줘 (지문 번호: ${passageIndex}):`];
+  if (targetGrammar && targetGrammar.trim()) lines.push(`목표 어법: ${targetGrammar.trim()}`);
+  lines.push('');
+  lines.push(passageText.trim());
+  const userMessage = lines.join('\n');
+
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents: [{ role: 'user', parts: [{ text: userMessage }] }],
+      generationConfig: { maxOutputTokens: maxTokens, responseMimeType: 'application/json', responseJsonSchema }
+    })
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(errBody?.error?.message || `Gemini API 오류 (${res.status})`);
+  }
+  const data = await res.json();
+  const candidate = data.candidates?.[0];
+  if (!candidate) throw new Error('Gemini가 응답을 반환하지 않았습니다. (안전 필터 등으로 차단되었을 수 있어요)');
+  const rawText = candidate.content.parts.filter(p => p.text).map(p => p.text).join('');
+  return JSON.parse(stripCodeFence(rawText));
+}
+
+async function runPassageAnalysis(apiKey, model, passage, passageIndex, targetGrammar){
+  const pdfStatus = document.getElementById('pdfStatus');
+  const pdfCard = document.getElementById('pdfCard');
+  pdfStatus.textContent = '분석 설정을 불러오는 중...';
+  const cfgRes = await fetch('/prompt-config');
+  if (!cfgRes.ok) throw new Error('서버에서 프롬프트 설정을 가져오지 못했습니다.');
+  const cfg = await cfgRes.json();
+
+  pdfStatus.textContent = 'AI가 지문을 분석하고 있습니다… (20~90초)';
+  const analysis = await callGeminiForAnalysis(apiKey, cfg.system_prompt, model, cfg.max_tokens, passage, passageIndex, targetGrammar, cfg.response_json_schema);
+
+  pdfStatus.textContent = 'PDF로 렌더링하는 중...';
+  const renderRes = await fetch('/render', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(analysis)
+  });
+  if (!renderRes.ok) {
+    const err = await renderRes.json().catch(() => ({}));
+    throw new Error(err.detail ? JSON.stringify(err.detail) : `렌더링 서버 오류 (${renderRes.status})`);
+  }
+  const renderData = await renderRes.json();
+  pdfCard.querySelector('p').remove();
+  const link = document.createElement('a');
+  link.className = 'dl';
+  link.href = renderData.download_url;
+  link.target = '_blank';
+  link.textContent = '📄 PDF 다운로드';
+  pdfCard.appendChild(link);
+}
+
+// ---- OX 워크북 (기존 comprehension 로직) ----
+function buildOxSystemPrompt(numKo, numEn){
+  const total = numKo + numEn;
+  const lastKo = String(numKo).padStart(2,'0');
+  const firstEn = numKo + 1;
+  const lastEn = total;
+  return `You generate a Korean EFL reading-comprehension worksheet from a passage the user supplies, in the exact style used by Korean English-academy workbooks (like Hackers).
+
+Produce exactly ${total} O/X (true/false) comprehension items about the passage, split into two groups:
+
+GROUP A (items 01-${lastKo}, exactly ${numKo} items, written in KOREAN):
+- One item per sentence/idea in the passage, in passage order.
+- Each item paraphrases one sentence in different Korean wording -- never a near-literal translation.
+- Mix true and false roughly 50/50 via negation, a swapped comparison, an added absolute word ("모든","전혀","항상"), or a swapped attribute.
+
+GROUP B (items ${firstEn}-${lastEn}, exactly ${numEn} items, written in ENGLISH):
+- Each item combines 2+ facts from different sentences, or restates the passage's overall claim/exception.
+- Still answerable purely from the passage text.
+
+Rules for both groups:
+- Never require outside knowledge not in the passage.
+- Balance O and X answers roughly evenly within each group.
+- Output ONLY valid JSON, no markdown code fences, no commentary before or after:
+{"titleKo": "짧은 한글 제목", "titleEn": "Short English title", "groupA": [{"num":"01","text":"...","answer":"O"}], "groupB": [{"num":"${firstEn}","text":"...","answer":"O"}]}
+groupA must have exactly ${numKo} items numbered 01-${lastKo}. groupB must have exactly ${numEn} items numbered ${firstEn}-${lastEn}.`;
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function runOxWorkbook(apiKey, model, passage, numKo, numEn){
+  const oxStatus = document.getElementById('oxStatus');
+  const oxPreview = document.getElementById('oxPreview');
+  oxStatus.textContent = '워크북을 만들고 있습니다… (최대 30초)';
+  const system = buildOxSystemPrompt(numKo, numEn);
+  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+    body: JSON.stringify({
+      system_instruction: { parts: [{ text: system }] },
+      contents: [{ role: 'user', parts: [{ text: passage }] }]
+    })
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data?.error?.message || 'API 요청이 실패했습니다.');
+  let text = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+  text = stripCodeFence(text);
+  const parsed = JSON.parse(text);
+
+  oxStatus.remove();
+  oxPreview.style.display = 'block';
+  const items = [...parsed.groupA, ...parsed.groupB];
+  let html = `<div style="font-weight:bold;margin-bottom:8px;">${escapeHtml(parsed.titleKo)}</div>`;
+  items.forEach(it => {
+    html += `<div class="ox-item"><b>${it.num}</b>${escapeHtml(it.text)} (${it.answer})</div>`;
+  });
+  oxPreview.innerHTML = html;
+
+  // 실제 PDF 생성 (passage-analyzer와 동일한 서버 렌더링 방식)
+  const oxCard = document.getElementById('oxCard');
+  const pdfStatusLine = document.createElement('p');
+  pdfStatusLine.id = 'oxPdfStatus';
+  pdfStatusLine.textContent = 'PDF로 렌더링하는 중...';
+  oxCard.insertBefore(pdfStatusLine, oxPreview);
+
+  try {
+    const renderRes = await fetch('/render-comprehension', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        titleKo: parsed.titleKo,
+        titleEn: parsed.titleEn,
+        groupA: parsed.groupA,
+        groupB: parsed.groupB,
+        passage,
+        source: null,
+        watermark: null
+      })
+    });
+    if (!renderRes.ok) {
+      const err = await renderRes.json().catch(() => ({}));
+      throw new Error(err.detail ? JSON.stringify(err.detail) : `렌더링 서버 오류 (${renderRes.status})`);
+    }
+    const renderData = await renderRes.json();
+    pdfStatusLine.remove();
+    const link = document.createElement('a');
+    link.className = 'dl';
+    link.href = renderData.download_url;
+    link.target = '_blank';
+    link.textContent = '📄 OX 워크북 PDF 다운로드';
+    oxCard.insertBefore(link, oxPreview);
+  } catch (e) {
+    pdfStatusLine.textContent = 'PDF 생성 오류: ' + e.message;
+  }
+}
+
+document.getElementById('go').addEventListener('click', async () => {
+  const apiKey = apiKeyEl.value.trim();
+  const passage = document.getElementById('passage').value.trim();
+  const passageIndex = parseInt(document.getElementById('passageIndex').value, 10) || 1;
+  const targetGrammar = document.getElementById('targetGrammar').value;
+  const numKo = parseInt(document.getElementById('numKo').value, 10) || 10;
+  const numEn = parseInt(document.getElementById('numEn').value, 10) || 5;
+  const model = document.getElementById('modelSelect').value;
+  const statusEl = document.getElementById('status');
+  const errEl = document.getElementById('err');
+  const goBtn = document.getElementById('go');
+
+  errEl.style.display = 'none';
+  if (!apiKey) { errEl.textContent = 'Gemini API 키를 입력해주세요.'; errEl.style.display = 'block'; return; }
+  if (!passage) { errEl.textContent = '지문을 입력해주세요.'; errEl.style.display = 'block'; return; }
+
+  goBtn.disabled = true;
+  statusEl.textContent = '두 가지를 동시에 생성하는 중입니다...';
+  document.getElementById('results').style.display = 'grid';
+
+  const [pdfResult, oxResult] = await Promise.allSettled([
+    runPassageAnalysis(apiKey, model, passage, passageIndex, targetGrammar),
+    runOxWorkbook(apiKey, model, passage, numKo, numEn),
+  ]);
+
+  if (pdfResult.status === 'rejected') {
+    document.getElementById('pdfStatus').textContent = '오류: ' + pdfResult.reason.message;
+  }
+  if (oxResult.status === 'rejected') {
+    document.getElementById('oxStatus').textContent = '오류: ' + oxResult.reason.message;
+  }
+
+  statusEl.textContent = (pdfResult.status === 'fulfilled' && oxResult.status === 'fulfilled')
+    ? '완료되었습니다!'
+    : '일부 작업에서 오류가 발생했습니다. 아래를 확인해주세요.';
+  goBtn.disabled = false;
+});
+</script>
+</body>
+</html>
